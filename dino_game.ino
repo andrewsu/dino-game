@@ -7,35 +7,58 @@ ArduinoLEDMatrix matrix;
 
 // ── Layout ────────────────────────────────────────────────
 // Row 7 = ground, rows 0–6 = play area
-// Dino: 2 px tall, column 1 (standing rows 5–6)
-// Obstacle: 1–2 px tall, scrolls right→left
+// Dino: 4×4 px sprite at cols 0–3, standing rows 3–6
+// Obstacle: 1–3 px tall, scrolls right→left
 // ─────────────────────────────────────────────────────────
 
 const int BUTTON_PIN  = 2;
 const int GROUND_ROW  = 7;
-const int DINO_COL    = 1;
-const int STAND_TOP   = GROUND_ROW - 2;  // row 5
+const int DINO_COL    = 0;
+const int DINO_H      = 4;
+const int STAND_TOP   = GROUND_ROW - DINO_H;  // row 3
 
-// Jump arc: how far (in rows) the dino top rises above STAND_TOP each phase
-const int JUMP_ARC[]  = { 2, 4, 5, 5, 4, 2 };
-const int JUMP_FRAMES = 6;
+// Two run frames — rows 1 & 3 swap to animate legs/arms
+// Pattern supplied by user:
+//   0011   head
+//   1010   upper body / arm
+//   1111   torso
+//   0101   legs
+const uint8_t DINO_PIXELS[2][4][4] = {
+  {                    // frame 0
+    {0, 0, 1, 1},
+    {1, 0, 1, 0},
+    {1, 1, 1, 1},
+    {0, 1, 0, 1},
+  },
+  {                    // frame 1 — rows 1 & 3 swapped
+    {0, 0, 1, 1},
+    {0, 1, 0, 1},
+    {1, 1, 1, 1},
+    {1, 0, 1, 0},
+  }
+};
+
+// Jump arc: how many rows above STAND_TOP the dino top rises each phase
+const int JUMP_ARC[]  = { 1, 2, 3, 3, 3, 3, 2, 1 };
+const int JUMP_FRAMES = 8;
 
 // ── State ─────────────────────────────────────────────────
-uint8_t  frame[8][12];
+uint8_t frame[8][12];
 
-int  dinoTopRow  = STAND_TOP;
-int  jumpPhase   = -1;   // -1 = grounded
+int  dinoTopRow = STAND_TOP;
+int  jumpPhase  = -1;   // -1 = grounded
+int  runFrame   = 0;    // 0 or 1
 
 int  obstacleCol = 11;
-int  obstacleH   = 1;    // 1 or 2 rows tall
+int  obstacleH   = 2;   // 1–3 rows tall
 
-int  score       = 0;
-bool gameOver    = false;
+int  score     = 0;
+bool gameOver  = false;
 
-unsigned long gameSpeed = 200;  // ms per game tick
+unsigned long gameSpeed = 150;  // ms per game tick
 unsigned long lastTick  = 0;
 
-// ── Helpers ───────────────────────────────────────────────
+// ── Draw helpers ──────────────────────────────────────────
 
 void clearFrame() {
   memset(frame, 0, sizeof(frame));
@@ -46,8 +69,15 @@ void drawGround() {
 }
 
 void drawDino() {
-  for (int r = dinoTopRow; r <= dinoTopRow + 1; r++)
-    if (r >= 0 && r < 8) frame[r][DINO_COL] = 1;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      if (!DINO_PIXELS[runFrame][r][c]) continue;
+      int absRow = dinoTopRow + r;
+      int absCol = DINO_COL   + c;
+      if (absRow >= 0 && absRow < 8 && absCol < 12)
+        frame[absRow][absCol] = 1;
+    }
+  }
 }
 
 void drawObstacle() {
@@ -65,18 +95,29 @@ void renderFrame() {
   matrix.renderBitmap(frame, 8, 12);
 }
 
+// ── Pixel-accurate collision ───────────────────────────────
+
 bool checkCollision() {
-  if (obstacleCol != DINO_COL) return false;
-  int obsTop = GROUND_ROW - obstacleH;  // row 6 or 5
-  return (dinoTopRow + 1) >= obsTop;    // dino bottom at or below obstacle top
+  int relCol = obstacleCol - DINO_COL;
+  if (relCol < 0 || relCol >= 4) return false;
+
+  int obsTop = GROUND_ROW - obstacleH;
+  for (int r = obsTop; r < GROUND_ROW; r++) {
+    int relRow = r - dinoTopRow;
+    if (relRow >= 0 && relRow < 4 && DINO_PIXELS[runFrame][relRow][relCol])
+      return true;
+  }
+  return false;
 }
+
+// ── Obstacle ──────────────────────────────────────────────
 
 void spawnObstacle() {
   obstacleCol = 11;
-  obstacleH   = random(1, 3);  // 1 or 2
+  obstacleH   = random(1, 4);  // 1, 2, or 3
 }
 
-// ── Game tick (runs at gameSpeed interval) ─────────────────
+// ── Game tick ─────────────────────────────────────────────
 
 void gameTick() {
   // Advance jump arc
@@ -90,11 +131,14 @@ void gameTick() {
     }
   }
 
-  // Scroll obstacle left
+  // Alternate run frame every tick
+  runFrame ^= 1;
+
+  // Scroll obstacle
   obstacleCol--;
   if (obstacleCol < 0) {
     score++;
-    if (gameSpeed > 80) gameSpeed -= 10;
+    if (gameSpeed > 60) gameSpeed -= 8;
     spawnObstacle();
   }
 
@@ -125,9 +169,10 @@ void showGameOver() {
 void resetGame() {
   dinoTopRow = STAND_TOP;
   jumpPhase  = -1;
+  runFrame   = 0;
   score      = 0;
   gameOver   = false;
-  gameSpeed  = 200;
+  gameSpeed  = 150;
   spawnObstacle();
   lastTick   = millis();
 }
@@ -146,14 +191,13 @@ void setup() {
 void loop() {
   if (gameOver) {
     showGameOver();
-    // Wait for button press to restart
     while (digitalRead(BUTTON_PIN) == HIGH) {}
     delay(200);
     resetGame();
     return;
   }
 
-  // Jump input — check every loop so the response is immediate
+  // Jump input — checked every loop for immediacy
   if (digitalRead(BUTTON_PIN) == LOW && jumpPhase == -1) {
     jumpPhase  = 0;
     dinoTopRow = STAND_TOP - JUMP_ARC[0];
