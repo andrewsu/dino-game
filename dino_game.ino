@@ -42,12 +42,12 @@ const int JUMP_FRAMES = 8;
 
 // ── State ─────────────────────────────────────────────────
 
-typedef enum { GROUNDED, JUMPING, ON_PLATFORM, FALLING } DinoState;
+typedef enum { DINO_GROUNDED, DINO_JUMPING, DINO_ON_PLATFORM, DINO_FALLING } DinoState;
 
 int       dinoTopRow = STAND_TOP;
 int       jumpPhase  = -1;
 int       runFrame   = 0;
-DinoState dinoState  = GROUNDED;
+DinoState dinoState  = DINO_GROUNDED;
 
 int  obstacleCol = 11;
 int  obstacleH   = 2;    // 1–3 rows tall
@@ -95,7 +95,7 @@ void renderFrame() {
 // ── Pixel-accurate collision (cactus column, full height) ─
 
 bool checkCollision() {
-  if (dinoState == ON_PLATFORM) return false;
+  if (dinoState == DINO_ON_PLATFORM) return false;
   int relCol = obstacleCol - DINO_COL;
   if (relCol < 0 || relCol >= 4) return false;
   int obsTop = GROUND_ROW - obstacleH;
@@ -112,8 +112,8 @@ bool checkCollision() {
 // if it has descended far enough and the obstacle is in horizontal range.
 
 void tryLandOnPlatform() {
-  bool descending = (dinoState == FALLING) ||
-                    (dinoState == JUMPING && jumpPhase >= JUMP_FRAMES / 2);
+  bool descending = (dinoState == DINO_FALLING) ||
+                    (dinoState == DINO_JUMPING && jumpPhase >= JUMP_FRAMES / 2);
   if (!descending) return;
 
   int obsTop    = GROUND_ROW - obstacleH;
@@ -127,7 +127,7 @@ void tryLandOnPlatform() {
   // Dino bottom has reached the platform surface
   if (dinoTopRow + DINO_H - 1 >= obsTop && dinoTopRow < STAND_TOP) {
     dinoTopRow = targetTop;
-    dinoState  = ON_PLATFORM;
+    dinoState  = DINO_ON_PLATFORM;
     jumpPhase  = -1;
   }
 }
@@ -145,7 +145,7 @@ void gameTick() {
   // Scroll obstacle (do this first so landing/collision use the new position)
   obstacleCol--;
   if (obstacleCol < 0) {
-    if (dinoState == ON_PLATFORM) dinoState = FALLING;
+    if (dinoState == DINO_ON_PLATFORM) dinoState = DINO_FALLING;
     score++;
     if (gameSpeed > 60) gameSpeed -= 8;
     spawnObstacle();
@@ -153,23 +153,23 @@ void gameTick() {
 
   // Update dino vertical position
   switch (dinoState) {
-    case JUMPING:
+    case DINO_JUMPING:
       jumpPhase++;
       if (jumpPhase >= JUMP_FRAMES) {
         jumpPhase  = -1;
         dinoTopRow = STAND_TOP;
-        dinoState  = GROUNDED;
+        dinoState  = DINO_GROUNDED;
       } else {
         dinoTopRow = STAND_TOP - JUMP_ARC[jumpPhase];
       }
       break;
 
-    case FALLING:
+    case DINO_FALLING:
       if (dinoTopRow < STAND_TOP) {
         dinoTopRow++;
       } else {
         dinoTopRow = STAND_TOP;
-        dinoState  = GROUNDED;
+        dinoState  = DINO_GROUNDED;
       }
       break;
 
@@ -209,7 +209,7 @@ void resetGame() {
   dinoTopRow = STAND_TOP;
   jumpPhase  = -1;
   runFrame   = 0;
-  dinoState  = GROUNDED;
+  dinoState  = DINO_GROUNDED;
   score      = 0;
   gameOver   = false;
   gameSpeed  = 150;
@@ -238,10 +238,10 @@ void loop() {
   }
 
   // Jump — only from ground (not from platform or mid-air)
-  if (digitalRead(BUTTON_PIN) == LOW && dinoState == GROUNDED) {
+  if (digitalRead(BUTTON_PIN) == LOW && dinoState == DINO_GROUNDED) {
     jumpPhase  = 0;
     dinoTopRow = STAND_TOP - JUMP_ARC[0];
-    dinoState  = JUMPING;
+    dinoState  = DINO_JUMPING;
     delay(50);   // debounce
   }
 
