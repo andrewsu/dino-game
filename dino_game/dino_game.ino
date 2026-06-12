@@ -58,6 +58,8 @@ bool gameOver = false;
 unsigned long gameSpeed = 150;   // ms per game tick
 unsigned long lastTick  = 0;
 
+int prevButton = HIGH;   // for edge detection
+
 // ── Draw helpers ──────────────────────────────────────────
 
 void clearFrame() { memset(frame, 0, sizeof(frame)); }
@@ -237,13 +239,14 @@ void loop() {
     return;
   }
 
-  // Jump — only from ground (not from platform or mid-air)
-  if (digitalRead(BUTTON_PIN) == LOW && dinoState == DINO_GROUNDED) {
+  // Jump — detect falling edge (HIGH→LOW) so a held button only fires once
+  int btn = digitalRead(BUTTON_PIN);
+  if (btn == LOW && prevButton == HIGH && dinoState == DINO_GROUNDED) {
     jumpPhase  = 0;
     dinoTopRow = STAND_TOP - JUMP_ARC[0];
     dinoState  = DINO_JUMPING;
-    delay(50);   // debounce
   }
+  prevButton = btn;
 
   unsigned long now = millis();
   if (now - lastTick >= gameSpeed) {
