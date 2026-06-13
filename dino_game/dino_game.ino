@@ -58,8 +58,6 @@ bool gameOver = false;
 unsigned long gameSpeed = 150;   // ms per game tick
 unsigned long lastTick  = 0;
 
-int prevButton = HIGH;   // for edge detection
-
 // ── Draw helpers ──────────────────────────────────────────
 
 void clearFrame() { memset(frame, 0, sizeof(frame)); }
@@ -94,18 +92,27 @@ void renderFrame() {
   matrix.renderBitmap(frame, 8, 12);
 }
 
-// ── Pixel-accurate collision (cactus column, full height) ─
+// ── Bounding-box collision: any obstacle pixel inside the 4×4 dino grid ─
 
 bool checkCollision() {
   if (dinoState == DINO_ON_PLATFORM) return false;
-  int relCol = obstacleCol - DINO_COL;
-  if (relCol < 0 || relCol >= 4) return false;
-  int obsTop = GROUND_ROW - obstacleH;
-  for (int r = obsTop; r < GROUND_ROW; r++) {
-    int relRow = r - dinoTopRow;
-    if (relRow >= 0 && relRow < DINO_H && DINO_PIXELS[runFrame][relRow][relCol])
+
+  int obsTop  = GROUND_ROW - obstacleH;
+  int dinoBot = dinoTopRow + DINO_H - 1;
+
+  // Platform row inside dino row range?
+  if (obsTop >= dinoTopRow && obsTop <= dinoBot) {
+    // Platform cols [obstacleCol-3 .. obstacleCol] overlap dino cols [0..3]?
+    if (obstacleCol >= DINO_COL && obstacleCol - PLATFORM_WIDTH + 1 <= DINO_COL + 3)
       return true;
   }
+
+  // Cactus body rows [obsTop+1 .. GROUND_ROW-1] overlap dino row range?
+  if (obstacleCol >= DINO_COL && obstacleCol <= DINO_COL + 3) {
+    if (obsTop + 1 <= dinoBot && GROUND_ROW - 1 >= dinoTopRow)
+      return true;
+  }
+
   return false;
 }
 
@@ -239,14 +246,12 @@ void loop() {
     return;
   }
 
-  // Jump — detect falling edge (HIGH→LOW) so a held button only fires once
-  int btn = digitalRead(BUTTON_PIN);
-  if (btn == LOW && prevButton == HIGH && dinoState == DINO_GROUNDED) {
+  // Jump — level detection: holding button jumps again immediately on landing
+  if (digitalRead(BUTTON_PIN) == LOW && dinoState == DINO_GROUNDED) {
     jumpPhase  = 0;
     dinoTopRow = STAND_TOP - JUMP_ARC[0];
     dinoState  = DINO_JUMPING;
   }
-  prevButton = btn;
 
   unsigned long now = millis();
   if (now - lastTick >= gameSpeed) {
