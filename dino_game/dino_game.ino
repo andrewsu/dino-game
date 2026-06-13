@@ -10,7 +10,7 @@ uint8_t frame[8][12];
 // ── Layout ────────────────────────────────────────────────
 // Row 7 = invisible floor (ground line removed)
 // Dino: 4×4 sprite, cols 0–3, standing rows 4–7
-// Obstacle: cactus pillar + 4-wide platform on top, scrolls right→left
+// Obstacle: cactus pillar; ~half also carry a 4-wide platform on top
 // ─────────────────────────────────────────────────────────
 
 const int BUTTON_PIN     = 8;
@@ -19,6 +19,10 @@ const int DINO_COL       = 0;
 const int DINO_H         = 4;
 const int STAND_TOP      = GROUND_ROW - DINO_H + 1;  // row 4 (feet at row 7)
 const int PLATFORM_WIDTH = 4;
+
+// Random number of idle ticks between one obstacle leaving and the next
+const int GAP_MIN_TICKS  = 3;
+const int GAP_MAX_TICKS  = 13;
 
 // Two run frames — rows 1 & 3 swap each tick for running animation
 const uint8_t DINO_PIXELS[2][4][4] = {
@@ -36,7 +40,7 @@ const uint8_t DINO_PIXELS[2][4][4] = {
   }
 };
 
-// Jump arc: peak elevation = 4 rows (dinoTopRow goes 4→3→2→1→0→0→1→2→3→4)
+// Jump arc: peak elevation = 4 rows above the launch row
 const int JUMP_ARC[]  = { 1, 2, 3, 4, 4, 3, 2, 1 };
 const int JUMP_FRAMES = 8;
 
@@ -44,13 +48,17 @@ const int JUMP_FRAMES = 8;
 
 typedef enum { DINO_GROUNDED, DINO_JUMPING, DINO_ON_PLATFORM, DINO_FALLING } DinoState;
 
-int       dinoTopRow = STAND_TOP;
-int       jumpPhase  = -1;
-int       runFrame   = 0;
-DinoState dinoState  = DINO_GROUNDED;
+int       dinoTopRow  = STAND_TOP;
+int       jumpPhase   = -1;
+int       jumpBaseRow = STAND_TOP;   // row the current jump launched from
+int       runFrame    = 0;
+DinoState dinoState   = DINO_GROUNDED;
 
-int  obstacleCol = 11;
-int  obstacleH   = 2;    // 1–3 rows tall
+int  obstacleCol      = 11;
+int  obstacleH        = 2;       // 1–3 rows tall
+bool obstacleHasPlatform = false;
+bool obstacleActive   = true;
+int  gapTicks         = 0;       // idle ticks remaining before next spawn
 
 int  score    = 0;
 bool gameOver = false;
@@ -75,14 +83,21 @@ void drawDino() {
 }
 
 void drawObstacle() {
-  if (obstacleCol >= 12) return;
+  if (!obstacleActive || obstacleCol >= 12) return;
   int obsTop = GROUND_ROW - obstacleH;
-  // Horizontal platform across the top
-  for (int c = obstacleCol - PLATFORM_WIDTH + 1; c <= obstacleCol; c++)
-    if (c >= 0 && c < 12) frame[obsTop][c] = 1;
-  // Vertical cactus body below the platform
-  for (int r = obsTop + 1; r < GROUND_ROW; r++)
-    if (obstacleCol >= 0) frame[r][obstacleCol] = 1;
+
+  if (obstacleHasPlatform) {
+    // Horizontal platform across the top
+    for (int c = obstacleCol - PLATFORM_WIDTH + 1; c <= obstacleCol; c++)
+      if (c >= 0 && c < 12) frame[obsTop][c] = 1;
+    // Vertical cactus body below the platform
+    for (int r = obsTop + 1; r < GROUND_ROW; r++)
+      if (obstacleCol >= 0) frame[r][obstacleCol] = 1;
+  } else {
+    // Plain cactus pillar (no ledge), full height
+    for (int r = obsTop; r < GROUND_ROW; r++)
+      if (obstacleCol >= 0) frame[r][obstacleCol] = 1;
+  }
 }
 
 void renderFrame() {
@@ -95,21 +110,20 @@ void renderFrame() {
 // ── Bounding-box collision: any obstacle pixel inside the 4×4 dino grid ─
 
 bool checkCollision() {
-  if (dinoState == DINO_ON_PLATFORM) return false;
+  if (!obstacleActive || dinoState == DINO_ON_PLATFORM) return false;
 
   int obsTop  = GROUND_ROW - obstacleH;
   int dinoBot = dinoTopRow + DINO_H - 1;
 
-  // Platform row inside dino row range?
-  if (obsTop >= dinoTopRow && obsTop <= dinoBot) {
-    // Platform cols [obstacleCol-3 .. obstacleCol] overlap dino cols [0..3]?
-    if (obstacleCol >= DINO_COL && obstacleCol - PLATFORM_WIDTH + 1 <= DINO_COL + 3)
+  // Cactus column: rows obsTop..GROUND_ROW-1 at obstacleCol
+  if (obstacleCol >= DINO_COL && obstacleCol <= DINO_COL + 3) {
+    if (obsTop <= dinoBot && GROUND_ROW - 1 >= dinoTopRow)
       return true;
   }
 
-  // Cactus body rows [obsTop+1 .. GROUND_ROW-1] overlap dino row range?
-  if (obstacleCol >= DINO_COL && obstacleCol <= DINO_COL + 3) {
-    if (obsTop + 1 <= dinoBot && GROUND_ROW - 1 >= dinoTopRow)
+  // Platform arms (only when present): row obsTop, cols obstacleCol-3..obstacleCol
+  if (obstacleHasPlatform && obsTop >= dinoTopRow && obsTop <= dinoBot) {
+    if (obstacleCol >= DINO_COL && obstacleCol - PLATFORM_WIDTH + 1 <= DINO_COL + 3)
       return true;
   }
 
@@ -121,6 +135,8 @@ bool checkCollision() {
 // if it has descended far enough and the obstacle is in horizontal range.
 
 void tryLandOnPlatform() {
+  if (!obstacleActive || !obstacleHasPlatform) return;
+
   bool descending = (dinoState == DINO_FALLING) ||
                     (dinoState == DINO_JUMPING && jumpPhase >= JUMP_FRAMES / 2);
   if (!descending) return;
@@ -145,19 +161,26 @@ void tryLandOnPlatform() {
 
 void spawnObstacle() {
   obstacleCol = 11;
-  obstacleH   = random(1, 4);  // 1, 2, or 3
+  obstacleH   = random(1, 4);       // 1, 2, or 3
+  obstacleHasPlatform = (random(2) == 0);  // ~50% carry a platform
+  obstacleActive = true;
 }
 
 // ── Game tick ────────────────────────────────────────────
 
 void gameTick() {
-  // Scroll obstacle (do this first so landing/collision use the new position)
-  obstacleCol--;
-  if (obstacleCol < 0) {
-    if (dinoState == DINO_ON_PLATFORM) dinoState = DINO_FALLING;
-    score++;
-    if (gameSpeed > 60) gameSpeed -= 8;
-    spawnObstacle();
+  // Scroll obstacle (or count down the gap before the next one)
+  if (obstacleActive) {
+    obstacleCol--;
+    if (obstacleCol < 0) {
+      if (dinoState == DINO_ON_PLATFORM) dinoState = DINO_FALLING;
+      score++;
+      if (gameSpeed > 60) gameSpeed -= 8;
+      obstacleActive = false;
+      gapTicks = random(GAP_MIN_TICKS, GAP_MAX_TICKS + 1);
+    }
+  } else {
+    if (--gapTicks <= 0) spawnObstacle();
   }
 
   // Update dino vertical position
@@ -166,10 +189,9 @@ void gameTick() {
       jumpPhase++;
       if (jumpPhase >= JUMP_FRAMES) {
         jumpPhase  = -1;
-        dinoTopRow = STAND_TOP;
-        dinoState  = DINO_GROUNDED;
+        dinoState  = DINO_FALLING;   // gravity finishes the descent
       } else {
-        dinoTopRow = STAND_TOP - JUMP_ARC[jumpPhase];
+        dinoTopRow = jumpBaseRow - JUMP_ARC[jumpPhase];
       }
       break;
 
@@ -215,15 +237,17 @@ void showGameOver() {
 // ── Reset ─────────────────────────────────────────────────
 
 void resetGame() {
-  dinoTopRow = STAND_TOP;
-  jumpPhase  = -1;
-  runFrame   = 0;
-  dinoState  = DINO_GROUNDED;
-  score      = 0;
-  gameOver   = false;
-  gameSpeed  = 150;
+  dinoTopRow  = STAND_TOP;
+  jumpPhase   = -1;
+  jumpBaseRow = STAND_TOP;
+  runFrame    = 0;
+  dinoState   = DINO_GROUNDED;
+  score       = 0;
+  gameOver    = false;
+  gameSpeed   = 150;
+  gapTicks    = 0;
   spawnObstacle();
-  lastTick   = millis();
+  lastTick    = millis();
 }
 
 // ── Arduino entry points ───────────────────────────────────
@@ -246,11 +270,14 @@ void loop() {
     return;
   }
 
-  // Jump — level detection: holding button jumps again immediately on landing
-  if (digitalRead(BUTTON_PIN) == LOW && dinoState == DINO_GROUNDED) {
-    jumpPhase  = 0;
-    dinoTopRow = STAND_TOP - JUMP_ARC[0];
-    dinoState  = DINO_JUMPING;
+  // Jump — from ground or a platform; level detection keeps it responsive
+  // (holding the button re-jumps the instant the dino lands).
+  if (digitalRead(BUTTON_PIN) == LOW &&
+      (dinoState == DINO_GROUNDED || dinoState == DINO_ON_PLATFORM)) {
+    jumpBaseRow = dinoTopRow;
+    jumpPhase   = 0;
+    dinoTopRow  = jumpBaseRow - JUMP_ARC[0];
+    dinoState   = DINO_JUMPING;
   }
 
   unsigned long now = millis();
