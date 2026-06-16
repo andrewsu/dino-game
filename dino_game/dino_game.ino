@@ -8,13 +8,14 @@ ArduinoLEDMatrix matrix;
 uint8_t frame[8][12];
 
 // ── Layout ────────────────────────────────────────────────
-// Row 7 = invisible floor (ground line removed)
+// Row 7 = bottom row (dino feet and cactus bases both rest here)
 // Dino: 4×4 sprite, cols 0–3, standing rows 4–7
-// Obstacle: cactus pillar; ~half also carry a 4-wide platform on top
+// Obstacle: cactus pillar; ~half also carry a 4-wide platform on top,
+// with the pillar dropping from a random column under the platform
 // ─────────────────────────────────────────────────────────
 
 const int BUTTON_PIN     = 8;
-const int GROUND_ROW     = 7;           // invisible floor row
+const int GROUND_ROW     = 7;           // bottom row
 const int DINO_COL       = 0;
 const int DINO_H         = 4;
 const int STAND_TOP      = GROUND_ROW - DINO_H + 1;  // row 4 (feet at row 7)
@@ -54,17 +55,32 @@ int       jumpBaseRow = STAND_TOP;   // row the current jump launched from
 int       runFrame    = 0;
 DinoState dinoState   = DINO_GROUNDED;
 
-int  obstacleCol      = 11;
-int  obstacleH        = 2;       // 1–3 rows tall
+int  obstacleCol         = 11;   // cactus pillar column
+int  obstacleH           = 2;    // 1–3 rows tall (bottom rests on GROUND_ROW)
 bool obstacleHasPlatform = false;
-bool obstacleActive   = true;
-int  gapTicks         = 0;       // idle ticks remaining before next spawn
+int  obstacleStemOffset  = 0;    // pillar position within platform [0..PLATFORM_WIDTH-1]
+bool obstacleActive      = true;
+int  gapTicks            = 0;    // idle ticks remaining before next spawn
 
 int  score    = 0;
 bool gameOver = false;
 
 unsigned long gameSpeed = 150;   // ms per game tick
 unsigned long lastTick  = 0;
+
+// ── Geometry helpers ──────────────────────────────────────
+
+// Top row of the obstacle (platform row when present, else cactus top)
+int obstacleTopRow() { return GROUND_ROW - obstacleH + 1; }
+
+// Platform horizontal extent (only meaningful when obstacleHasPlatform)
+int platformLeftCol()  { return obstacleCol - obstacleStemOffset; }
+int platformRightCol() { return obstacleCol + (PLATFORM_WIDTH - 1 - obstacleStemOffset); }
+
+// Rightmost column occupied by the whole obstacle
+int obstacleRightCol() {
+  return obstacleHasPlatform ? platformRightCol() : obstacleCol;
+}
 
 // ── Draw helpers ──────────────────────────────────────────
 
@@ -83,20 +99,20 @@ void drawDino() {
 }
 
 void drawObstacle() {
-  if (!obstacleActive || obstacleCol >= 12) return;
-  int obsTop = GROUND_ROW - obstacleH;
+  if (!obstacleActive) return;
+  int obsTop = obstacleTopRow();
 
   if (obstacleHasPlatform) {
     // Horizontal platform across the top
-    for (int c = obstacleCol - PLATFORM_WIDTH + 1; c <= obstacleCol; c++)
+    for (int c = platformLeftCol(); c <= platformRightCol(); c++)
       if (c >= 0 && c < 12) frame[obsTop][c] = 1;
-    // Vertical cactus body below the platform
-    for (int r = obsTop + 1; r < GROUND_ROW; r++)
-      if (obstacleCol >= 0) frame[r][obstacleCol] = 1;
+    // Vertical cactus body below the platform, down to the bottom row
+    for (int r = obsTop + 1; r <= GROUND_ROW; r++)
+      if (obstacleCol >= 0 && obstacleCol < 12) frame[r][obstacleCol] = 1;
   } else {
-    // Plain cactus pillar (no ledge), full height
-    for (int r = obsTop; r < GROUND_ROW; r++)
-      if (obstacleCol >= 0) frame[r][obstacleCol] = 1;
+    // Plain cactus pillar (no ledge), full height down to the bottom row
+    for (int r = obsTop; r <= GROUND_ROW; r++)
+      if (obstacleCol >= 0 && obstacleCol < 12) frame[r][obstacleCol] = 1;
   }
 }
 
@@ -112,18 +128,19 @@ void renderFrame() {
 bool checkCollision() {
   if (!obstacleActive || dinoState == DINO_ON_PLATFORM) return false;
 
-  int obsTop  = GROUND_ROW - obstacleH;
+  int obsTop  = obstacleTopRow();
   int dinoBot = dinoTopRow + DINO_H - 1;
 
-  // Cactus column: rows obsTop..GROUND_ROW-1 at obstacleCol
+  // Cactus pillar: rows (platform ? obsTop+1 : obsTop)..GROUND_ROW at obstacleCol
+  int pillarTop = obstacleHasPlatform ? obsTop + 1 : obsTop;
   if (obstacleCol >= DINO_COL && obstacleCol <= DINO_COL + 3) {
-    if (obsTop <= dinoBot && GROUND_ROW - 1 >= dinoTopRow)
+    if (pillarTop <= dinoBot && GROUND_ROW >= dinoTopRow)
       return true;
   }
 
-  // Platform arms (only when present): row obsTop, cols obstacleCol-3..obstacleCol
+  // Platform arms (only when present): row obsTop across [platLeft..platRight]
   if (obstacleHasPlatform && obsTop >= dinoTopRow && obsTop <= dinoBot) {
-    if (obstacleCol >= DINO_COL && obstacleCol - PLATFORM_WIDTH + 1 <= DINO_COL + 3)
+    if (platformLeftCol() <= DINO_COL + 3 && platformRightCol() >= DINO_COL)
       return true;
   }
 
@@ -132,7 +149,7 @@ bool checkCollision() {
 
 // ── Platform landing ──────────────────────────────────────
 // Called after dino position update; snaps dino onto the platform
-// if it has descended far enough and the obstacle is in horizontal range.
+// if it has descended far enough and the platform is in horizontal range.
 
 void tryLandOnPlatform() {
   if (!obstacleActive || !obstacleHasPlatform) return;
@@ -141,12 +158,12 @@ void tryLandOnPlatform() {
                     (dinoState == DINO_JUMPING && jumpPhase >= JUMP_FRAMES / 2);
   if (!descending) return;
 
-  int obsTop    = GROUND_ROW - obstacleH;
+  int obsTop    = obstacleTopRow();
   int targetTop = obsTop - DINO_H;   // dinoTopRow when feet rest on platform
 
-  // Platform x-range [obstacleCol-3 .. obstacleCol] must overlap dino cols [0..3]
-  bool xOverlap = (obstacleCol >= DINO_COL) &&
-                  (obstacleCol - PLATFORM_WIDTH + 1 <= DINO_COL + 3);
+  // Platform must overlap dino cols [0..3]
+  bool xOverlap = (platformLeftCol() <= DINO_COL + 3) &&
+                  (platformRightCol() >= DINO_COL);
   if (!xOverlap) return;
 
   // Dino bottom has reached the platform surface
@@ -160,9 +177,16 @@ void tryLandOnPlatform() {
 // ── Obstacle ─────────────────────────────────────────────
 
 void spawnObstacle() {
-  obstacleCol = 11;
-  obstacleH   = random(1, 4);       // 1, 2, or 3
-  obstacleHasPlatform = (random(2) == 0);  // ~50% carry a platform
+  obstacleH           = random(1, 4);          // 1, 2, or 3
+  obstacleHasPlatform = (random(2) == 0);      // ~50% carry a platform
+  obstacleStemOffset  = random(0, PLATFORM_WIDTH);  // pillar at random spot
+
+  // Start with the obstacle's right edge at the rightmost column (11)
+  if (obstacleHasPlatform)
+    obstacleCol = 11 - (PLATFORM_WIDTH - 1 - obstacleStemOffset);
+  else
+    obstacleCol = 11;
+
   obstacleActive = true;
 }
 
@@ -172,7 +196,7 @@ void gameTick() {
   // Scroll obstacle (or count down the gap before the next one)
   if (obstacleActive) {
     obstacleCol--;
-    if (obstacleCol < 0) {
+    if (obstacleRightCol() < 0) {   // fully scrolled off the left edge
       if (dinoState == DINO_ON_PLATFORM) dinoState = DINO_FALLING;
       score++;
       if (gameSpeed > 60) gameSpeed -= 8;
